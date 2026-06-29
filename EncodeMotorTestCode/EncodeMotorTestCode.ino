@@ -1,125 +1,62 @@
-// ===================================
-// DAKE MOTOR - ROTATION + RPM
-// SNT MAG 18A2 V2 ENCODER
-// Rotating: FRONT OUTPUT SHAFT
-// CPR: 1200 (after gearbox)
-// ===================================
-
 #define ENCODER_A 5
 #define ENCODER_B 18
 
-#define PPR 18                  // 1200 / 4
-#define QUADRATURE 4             // 4x quadrature decoding
-#define CPR (PPR * QUADRATURE)   // = 1200 counts per revolution
 
-volatile long pulses = 0;
-volatile uint8_t lastState = 0;
+const float ENCODER_CPR = 374.0; 
 
-// ===================================
-// QUADRATURE DECODE
-// ===================================
-inline int8_t decodeQuadrature(uint8_t last, uint8_t current) {
-  if ((last == 0b00 && current == 0b01) ||
-      (last == 0b01 && current == 0b11) ||
-      (last == 0b11 && current == 0b10) ||
-      (last == 0b10 && current == 0b00)) return +1;
-  if ((last == 0b00 && current == 0b10) ||
-      (last == 0b10 && current == 0b11) ||
-      (last == 0b11 && current == 0b01) ||
-      (last == 0b01 && current == 0b00)) return -1;
-  return 0;
-}
+// --- VARIABLES ---
+volatile long encoderTicks = 0;
+unsigned long previousMillis = 0;
+const long interval = 500; // Calculate RPM every 500ms
+float currentRPM = 0.0;
 
-// ===================================
-// ENCODER TASK - CORE 0
-// ===================================
-void EncoderTask(void *parameter) {
-  lastState = (digitalRead(ENCODER_A) << 1) | digitalRead(ENCODER_B);
-  while (true) {
-    uint8_t currentState = (digitalRead(ENCODER_A) << 1) | digitalRead(ENCODER_B);
-    int8_t dir = decodeQuadrature(lastState, currentState);
-    pulses += dir;
-    lastState = currentState;
-    vTaskDelay(1);
+// Interrupt Service Routine (ISR) for Encoder A
+void IRAM_ATTR readEncoder() {
+  // Read Pin B to determine direction
+  if (digitalRead(ENCODER_B) == HIGH) {
+    encoderTicks++;
+  } else {
+    encoderTicks--;
   }
 }
 
-// ===================================
-// SETUP
-// ===================================
 void setup() {
   Serial.begin(115200);
-  delay(1000);
 
-  pinMode(ENCODER_A, INPUT);
-  pinMode(ENCODER_B, INPUT);
+  // Configure encoder pins with internal pull-up resistors
+  pinMode(ENCODER_A, INPUT_PULLUP);
+  pinMode(ENCODER_B, INPUT_PULLUP);
 
-  Serial.println("==============================");
-  Serial.println("   DAKE MOTOR ENCODER");
-  Serial.println("   SNT MAG 18A2 V2");
-  Serial.println("   CPR : 1200");
-  Serial.println("   Send r to reset");
-  Serial.println("==============================");
-
-  xTaskCreatePinnedToCore(
-    EncoderTask,
-    "EncoderTask",
-    4096,
-    NULL,
-    2,
-    NULL,
-    0
-  );
+  // Attach interrupt to Pin A on RISING edge
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A), readEncoder, RISING);
+  
+  Serial.println("ESP32 Encoder RPM Measurement Started.");
 }
 
-// ===================================
-// MAIN LOOP
-// ===================================
 void loop() {
-  static long lastPulses = 0;
-  static long rpmPulses = 0;
-  static unsigned long lastTime = 0;
+  unsigned long currentMillis = millis();
 
-  unsigned long currentTime = millis();
-  unsigned long elapsed = currentTime - lastTime;
+  // Non-blocking timer to calculate RPM
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
 
-  // Print on every count change
-  if (pulses != lastPulses) {
-    float totalRotations = (float)pulses / CPR;
+    // Read and reset ticks safely by temporarily disabling interrupts
+    noInterrupts();
+    long ticks = encoderTicks;
+    encoderTicks = 0;
+    interrupts();
 
-    Serial.print("Pulses: ");
-    Serial.print(pulses);
-    Serial.print("  |  Rotations: ");
-    Serial.print(totalRotations, 2);
-    Serial.print("  |  Dir: ");
-    Serial.println(pulses > lastPulses ? "CW  -->" : "<-- CCW");
+    // Calculate RPM: (ticks / CPR) * (60,000ms / interval_ms)
+    float revolutions = (float)ticks / ENCODER_CPR;
+    float timeFactor = 60000.0 / interval;
+    currentRPM = revolutions * timeFactor;
 
-    lastPulses = pulses;
+    // Print results to Serial Monitor
+    Serial.print("Ticks/interval: ");
+    Serial.print(ticks);
+    Serial.print(" | Motor RPM: ");
+    Serial.println(currentRPM, 2);
   }
 
-  // RPM every 500ms
-  if (elapsed >= 500) {
-    long deltaPulses = pulses - rpmPulses;
-    float rpm = ((float)deltaPulses / CPR) / ((float)elapsed / 60000.0);
-
-    Serial.print(">>> RPM: ");
-    Serial.print(abs(rpm), 1);
-    Serial.print("  |  Dir: ");
-    Serial.println(deltaPulses >= 0 ? "CW  -->" : "<-- CCW");
-
-    rpmPulses = pulses;
-    lastTime = currentTime;
-  }
-
-  // Reset
-  if (Serial.available() && Serial.read() == 'r') {
-    pulses = 0;
-    lastPulses = 0;
-    rpmPulses = 0;
-    Serial.println("==============================");
-    Serial.println("        RESET TO ZERO");
-    Serial.println("==============================");
-  }
-
-  delay(10);
+  // You can freely add other non-blocking code here
 }
